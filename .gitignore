@@ -1,0 +1,12 @@
+# Backend
+/backend/target/
+
+# Frontend
+/frontend/node_modules/
+/frontend/dist/
+
+# App data
+/data
+
+# OS
+.DS_Store
