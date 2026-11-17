@@ -21,11 +21,8 @@ use crate::{
     thumbnail,
 };
 
-/// Hard cap per uploaded file (2 GiB). Mirrored by the request body limit layer.
 pub const MAX_UPLOAD_BYTES: i64 = 2 * 1024 * 1024 * 1024;
 
-// Common SELECT + joins for file listings. Tags are aggregated via group_concat;
-// the dynamic WHERE clause is appended with QueryBuilder so filter values bind safely.
 const FILE_SELECT: &str = "SELECT f.id, f.original_name, f.mime_type, f.size_bytes, f.folder_id, f.created_at, \
     (f.thumbnail_path IS NOT NULL) AS has_thumbnail, group_concat(t.name) AS tags \
     FROM files f LEFT JOIN file_tags ft ON ft.file_id = f.id LEFT JOIN tags t ON t.id = ft.tag_id ";
@@ -37,14 +34,10 @@ const GET_ONE: &str = "SELECT f.id, f.original_name, f.mime_type, f.size_bytes, 
 
 #[derive(Deserialize)]
 pub struct ListQuery {
-    /// `None`/`"root"`/empty → root level; otherwise a folder id. Ignored while searching.
     pub folder_id: Option<String>,
-    /// Case-insensitive substring match on the file name.
     pub q: Option<String>,
-    /// MIME category: image | video | audio | model | pdf | text | other.
     #[serde(rename = "type")]
     pub file_type: Option<String>,
-    /// Exact tag name.
     pub tag: Option<String>,
 }
 
@@ -53,9 +46,6 @@ fn push_separator(qb: &mut QueryBuilder<Sqlite>, has_where: &mut bool) {
     *has_where = true;
 }
 
-/// Escape SQL `LIKE` wildcards so user input matches literally. Without this a
-/// search for `%` matches every file and `n_tes` matches `notes.txt`. Pair with
-/// an `ESCAPE '\'` clause.
 fn escape_like(input: &str) -> String {
     let mut out = String::with_capacity(input.len());
     for ch in input.chars() {
@@ -67,8 +57,6 @@ fn escape_like(input: &str) -> String {
     out
 }
 
-/// Append the MIME-category predicate. The patterns are constant literals, so no
-/// binding is needed.
 fn push_type_predicate(qb: &mut QueryBuilder<Sqlite>, file_type: &str) {
     match file_type {
         "image" => qb.push("f.mime_type LIKE 'image/%'"),
@@ -91,9 +79,6 @@ fn push_type_predicate(qb: &mut QueryBuilder<Sqlite>, file_type: &str) {
     };
 }
 
-/// `GET /api/files` — list files with optional filters. When any of `q`/`type`/`tag`
-/// is set the search spans all folders; otherwise results are scoped to `folder_id`
-/// (`"root"`/absent → top level), newest first.
 pub async fn list(
     State(state): State<AppState>,
     Query(query): Query<ListQuery>,
@@ -121,7 +106,6 @@ pub async fn list(
             .push(" ESCAPE '\\'");
     }
     if let Some(tag) = tag {
-        // Filter via a subquery so group_concat still returns the file's full tag set.
         push_separator(&mut qb, &mut has_where);
         qb.push("f.id IN (SELECT ft2.file_id FROM file_tags ft2 JOIN tags t2 ON t2.id = ft2.tag_id WHERE t2.name = ")
             .push_bind(tag.to_string())
@@ -149,7 +133,6 @@ pub async fn list(
     Ok(Json(rows.into_iter().map(FileDto::from).collect()))
 }
 
-/// `GET /api/files/{id}` — metadata for one file.
 pub async fn get_one(
     State(state): State<AppState>,
     Path(id): Path<String>,
@@ -162,11 +145,6 @@ pub async fn get_one(
     Ok(Json(row.into()))
 }
 
-/// Stream one multipart field to `path`, returning the bytes written.
-///
-/// Enforces the per-file cap. In practice the `DefaultBodyLimit` layer on the
-/// upload route rejects an oversized *request body* before this check can fire —
-/// this guards the per-file case and keeps the limit honest if the layer changes.
 async fn stream_to_disk(field: &mut Field<'_>, path: &FsPath) -> Result<i64, AppError> {
     let mut file = tokio::fs::File::create(path).await?;
     let mut size: i64 = 0;
@@ -187,8 +165,6 @@ async fn stream_to_disk(field: &mut Field<'_>, path: &FsPath) -> Result<i64, App
     Ok(size)
 }
 
-/// `POST /api/files` — multipart upload. Each file part is streamed to disk
-/// (never fully buffered) and recorded in the database.
 pub async fn upload(
     State(state): State<AppState>,
     mut multipart: Multipart,
@@ -200,14 +176,10 @@ pub async fn upload(
         .await
         .map_err(|e| AppError::BadRequest(format!("invalid multipart body: {e}")))?
     {
-        // Only handle parts that carry a filename (i.e. actual file uploads).
         let Some(original_name) = field.file_name().map(str::to_owned) else {
             continue;
         };
         let declared_mime = field.content_type().map(str::to_owned);
-
-        // Store under a UUID (keeping the extension so MIME detection still works
-        // and the path can never escape the uploads dir).
         let id = Uuid::new_v4().to_string();
         let stored_name = match FsPath::new(&original_name)
             .extension()
@@ -218,8 +190,6 @@ pub async fn upload(
         };
         let path = state.uploads_dir.join(&stored_name);
 
-        // On any streaming failure, delete the partial file rather than leaving
-        // orphaned bytes on disk with no database row pointing at them.
         let size = match stream_to_disk(&mut field, &path).await {
             Ok(size) => size,
             Err(e) => {
@@ -228,7 +198,6 @@ pub async fn upload(
             }
         };
 
-        // Prefer the browser-declared type; fall back to guessing from extension.
         let mime_type = declared_mime.unwrap_or_else(|| {
             mime_guess::from_path(&original_name)
                 .first_or_octet_stream()
@@ -252,8 +221,6 @@ pub async fn upload(
         .execute(&state.db)
         .await?;
 
-        // Best-effort thumbnail for images. Failure (unsupported/corrupt image)
-        // just leaves thumbnail_path NULL — it never fails the upload.
         let mut has_thumbnail = false;
         if mime_type.starts_with("image/") {
             let thumb_path = state.thumbnails_dir.join(format!("{id}.png"));
@@ -293,12 +260,6 @@ pub async fn upload(
     Ok(Json(uploaded))
 }
 
-/// Whether we're willing to let the browser render this type inline.
-///
-/// `mime_type` comes from the *client-declared* multipart content type, so an
-/// attacker fully controls it. Anything not on this list is forced to download,
-/// which stops `text/html` (or a script-carrying `image/svg+xml`) uploaded to
-/// this origin from executing against the unauthenticated API.
 fn is_inline_safe(mime_type: &str) -> bool {
     let essence = mime_type
         .split(';')
@@ -307,7 +268,6 @@ fn is_inline_safe(mime_type: &str) -> bool {
         .trim()
         .to_ascii_lowercase();
 
-    // SVG is deliberately carved out of image/* — it can carry <script>.
     if essence == "image/svg+xml" || essence == "image/svg" {
         return false;
     }
@@ -317,12 +277,6 @@ fn is_inline_safe(mime_type: &str) -> bool {
         || essence == "application/pdf"
 }
 
-/// `GET /api/files/{id}/raw` — stream the file bytes. Delegates to tower-http's
-/// `ServeFile`, which handles HTTP Range requests (needed for video seeking and
-/// large 3D models) and sets the content type we recorded at upload time.
-///
-/// Text and model files are fetched by the frontend via `fetch()`/three.js rather
-/// than rendered by the browser, so forcing them to `attachment` costs nothing.
 pub async fn serve_raw(
     State(state): State<AppState>,
     Path(id): Path<String>,
@@ -343,7 +297,7 @@ pub async fn serve_raw(
 
     let response = ServeFile::new_with_mime(&storage_path, &mime)
         .oneshot(request)
-        .await // ServeFile's error type is Infallible
+        .await 
         .into_response();
 
     let mut response = response;
@@ -362,7 +316,6 @@ pub async fn serve_raw(
     Ok(response)
 }
 
-/// `GET /api/files/{id}/thumb` — serve the generated thumbnail (PNG), or 404.
 pub async fn serve_thumb(
     State(state): State<AppState>,
     Path(id): Path<String>,
@@ -373,9 +326,9 @@ pub async fn serve_thumb(
             .bind(&id)
             .fetch_optional(&state.db)
             .await?
-            .ok_or(AppError::NotFound)? // no such file
+            .ok_or(AppError::NotFound)?
             .0
-            .ok_or(AppError::NotFound)?; // file exists but has no thumbnail
+            .ok_or(AppError::NotFound)?;
 
     let response = ServeFile::new(&thumbnail_path)
         .oneshot(request)
@@ -390,7 +343,6 @@ pub struct RenameRequest {
     pub original_name: String,
 }
 
-/// `PATCH /api/files/{id}` — rename a file (display name only).
 pub async fn rename(
     State(state): State<AppState>,
     Path(id): Path<String>,
@@ -414,11 +366,9 @@ pub async fn rename(
 #[derive(Deserialize)]
 pub struct MoveRequest {
     pub ids: Vec<String>,
-    /// Target folder, or `null` to move to the root.
     pub folder_id: Option<String>,
 }
 
-/// `POST /api/files/move` — move one or more files into a folder (or the root).
 pub async fn move_files(
     State(state): State<AppState>,
     Json(req): Json<MoveRequest>,
@@ -451,7 +401,6 @@ pub struct DeleteManyRequest {
     pub ids: Vec<String>,
 }
 
-/// `POST /api/files/delete` — delete several files at once.
 pub async fn delete_many(
     State(state): State<AppState>,
     Json(req): Json<DeleteManyRequest>,
@@ -462,7 +411,6 @@ pub async fn delete_many(
     Ok(StatusCode::NO_CONTENT)
 }
 
-/// `DELETE /api/files/{id}` — remove a single file.
 pub async fn delete(
     State(state): State<AppState>,
     Path(id): Path<String>,
@@ -474,8 +422,6 @@ pub async fn delete(
     }
 }
 
-/// Delete a file's DB row and its bytes/thumbnail on disk. Returns whether a row
-/// existed. Disk cleanup is best-effort.
 async fn remove_file_record(state: &AppState, id: &str) -> Result<bool, AppError> {
     let row = sqlx::query_as::<_, (String, Option<String>)>(
         "SELECT storage_path, thumbnail_path FROM files WHERE id = ?",

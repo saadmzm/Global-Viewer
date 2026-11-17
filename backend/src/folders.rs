@@ -9,7 +9,6 @@ use uuid::Uuid;
 
 use crate::{AppState, error::AppError, models::FolderDto};
 
-/// `GET /api/folders` — all folders (flat; the client builds the tree).
 pub async fn list(State(state): State<AppState>) -> Result<Json<Vec<FolderDto>>, AppError> {
     let folders = sqlx::query_as::<_, FolderDto>(
         "SELECT id, name, parent_id, created_at FROM folders ORDER BY name",
@@ -25,7 +24,6 @@ pub struct CreateFolder {
     pub parent_id: Option<String>,
 }
 
-/// `POST /api/folders` — create a folder, optionally nested under a parent.
 pub async fn create(
     State(state): State<AppState>,
     Json(req): Json<CreateFolder>,
@@ -72,7 +70,6 @@ pub struct RenameFolder {
     pub name: String,
 }
 
-/// `PATCH /api/folders/{id}` — rename a folder.
 pub async fn rename(
     State(state): State<AppState>,
     Path(id): Path<String>,
@@ -93,8 +90,6 @@ pub async fn rename(
     Ok(StatusCode::NO_CONTENT)
 }
 
-/// `DELETE /api/folders/{id}` — delete a folder. Subfolders cascade-delete; files
-/// inside move to the root (folder_id set NULL), per the schema's FK actions.
 pub async fn delete(
     State(state): State<AppState>,
     Path(id): Path<String>,

@@ -1,6 +1,3 @@
--- Global Viewer initial schema
--- Single-user for now; owner_id columns are nullable and ready for auth later.
-
 CREATE TABLE folders (
     id         TEXT PRIMARY KEY,
     name       TEXT NOT NULL,
@@ -15,7 +12,7 @@ CREATE TABLE files (
     mime_type      TEXT NOT NULL,
     size_bytes     INTEGER NOT NULL,
     storage_path   TEXT NOT NULL,              -- absolute/relative path to bytes on disk
-    thumbnail_path TEXT,                        -- NULL when no thumbnail generated
+    thumbnail_path TEXT,
     folder_id      TEXT REFERENCES folders (id) ON DELETE SET NULL,
     created_at     TEXT NOT NULL,
     owner_id       TEXT

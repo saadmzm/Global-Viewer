@@ -23,12 +23,11 @@ mod models;
 mod tags;
 mod thumbnail;
 
-/// Shared application state handed to every request handler.
 #[derive(Clone)]
 pub struct AppState {
     db: SqlitePool,
     uploads_dir: PathBuf,
-    #[allow(dead_code)] // used starting in phase 2 (thumbnails)
+    #[allow(dead_code)]
     thumbnails_dir: PathBuf,
 }
 
@@ -36,7 +35,6 @@ pub struct AppState {
 async fn main() -> anyhow::Result<()> {
     init_tracing();
 
-    // All persistent state lives under DATA_DIR (defaults to the repo's ./data).
     let data_dir = PathBuf::from(std::env::var("DATA_DIR").unwrap_or_else(|_| "../data".into()));
     let uploads_dir = data_dir.join("uploads");
     let thumbnails_dir = data_dir.join("thumbnails");
@@ -61,9 +59,7 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Assemble the application router. Extracted so tests can drive it in-process.
 fn build_router(state: AppState) -> Router {
-    // Permissive CORS for local dev (Vite runs on a different port).
     let cors = CorsLayer::new()
         .allow_origin(Any)
         .allow_methods(Any)
@@ -71,16 +67,12 @@ fn build_router(state: AppState) -> Router {
 
     Router::new()
         .route("/api/health", get(health))
-        // The 2 GiB body limit is scoped to this route only. Applied globally it
-        // would also let the JSON endpoints below buffer 2 GiB in memory before
-        // deserializing; they keep axum's 2 MB default.
         .route(
             "/api/files",
             get(files::list)
                 .post(files::upload)
                 .layer(DefaultBodyLimit::max(files::MAX_UPLOAD_BYTES as usize)),
         )
-        // Static segments must be declared before the `{id}` param route.
         .route("/api/files/move", post(files::move_files))
         .route("/api/files/delete", post(files::delete_many))
         .route(
@@ -112,7 +104,6 @@ fn init_tracing() {
         .init();
 }
 
-/// Open (creating if needed) the SQLite database in WAL mode and run migrations.
 async fn init_db(path: &std::path::Path) -> anyhow::Result<SqlitePool> {
     let options = SqliteConnectOptions::new()
         .filename(path)
@@ -131,7 +122,6 @@ async fn init_db(path: &std::path::Path) -> anyhow::Result<SqlitePool> {
     Ok(db)
 }
 
-/// Liveness + DB connectivity check.
 async fn health(State(state): State<AppState>) -> Json<Value> {
     let db_ok = sqlx::query_scalar::<_, i64>("SELECT 1")
         .fetch_one(&state.db)
@@ -149,7 +139,6 @@ mod tests {
     };
     use tower::ServiceExt;
 
-    /// Build an AppState backed by a throwaway temp directory + SQLite file.
     async fn test_state() -> (AppState, PathBuf) {
         let base = std::env::temp_dir().join(format!("gv-test-{}", uuid::Uuid::new_v4()));
         let uploads_dir = base.join("uploads");
@@ -194,7 +183,6 @@ mod tests {
         let content = b"hello global viewer";
         let body = multipart_body(boundary, "hello.txt", "text/plain", content);
 
-        // --- Upload ---
         let res = app
             .clone()
             .oneshot(
@@ -217,7 +205,6 @@ mod tests {
         assert_eq!(uploaded[0]["size_bytes"], content.len() as i64);
         let id = uploaded[0]["id"].as_str().unwrap().to_string();
 
-        // --- List ---
         let res = app
             .clone()
             .oneshot(
@@ -233,7 +220,6 @@ mod tests {
         let listed: Vec<Value> = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(listed.len(), 1);
 
-        // --- Serve raw (full) ---
         let res = app
             .clone()
             .oneshot(
@@ -248,7 +234,6 @@ mod tests {
         let bytes = to_bytes(res.into_body(), usize::MAX).await.unwrap();
         assert_eq!(&bytes[..], content);
 
-        // --- Serve raw (Range request → 206 Partial Content) ---
         let res = app
             .clone()
             .oneshot(
@@ -264,7 +249,6 @@ mod tests {
         let bytes = to_bytes(res.into_body(), usize::MAX).await.unwrap();
         assert_eq!(&bytes[..], &content[0..5]);
 
-        // --- Delete ---
         let res = app
             .clone()
             .oneshot(
@@ -278,7 +262,6 @@ mod tests {
             .unwrap();
         assert_eq!(res.status(), StatusCode::NO_CONTENT);
 
-        // --- Gone now ---
         let res = app
             .clone()
             .oneshot(
@@ -299,7 +282,6 @@ mod tests {
         let (state, base) = test_state().await;
         let app = build_router(state);
 
-        // Encode a small real PNG so the image crate can actually decode it.
         let mut png = Vec::new();
         image::DynamicImage::ImageRgb8(image::RgbImage::new(8, 8))
             .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
@@ -324,7 +306,6 @@ mod tests {
         assert_eq!(uploaded[0]["has_thumbnail"], true);
         let id = uploaded[0]["id"].as_str().unwrap().to_string();
 
-        // Thumbnail is served and is itself a valid PNG.
         let res = app
             .clone()
             .oneshot(
@@ -345,7 +326,6 @@ mod tests {
         let _ = tokio::fs::remove_dir_all(base).await;
     }
 
-    /// Helper: JSON POST/PUT/PATCH request.
     fn json_request(method: &str, uri: String, value: Value) -> Request<Body> {
         Request::builder()
             .method(method)
@@ -360,7 +340,6 @@ mod tests {
         let (state, base) = test_state().await;
         let app = build_router(state);
 
-        // Create a folder.
         let res = app
             .clone()
             .oneshot(json_request(
@@ -375,7 +354,6 @@ mod tests {
         let folder: Value = serde_json::from_slice(&bytes).unwrap();
         let folder_id = folder["id"].as_str().unwrap().to_string();
 
-        // Upload a file (lands at the root).
         let body = multipart_body("B", "note.txt", "text/plain", b"hi");
         let res = app
             .clone()
@@ -393,7 +371,6 @@ mod tests {
         let uploaded: Vec<Value> = serde_json::from_slice(&bytes).unwrap();
         let file_id = uploaded[0]["id"].as_str().unwrap().to_string();
 
-        // Move it into the folder.
         let res = app
             .clone()
             .oneshot(json_request(
@@ -405,14 +382,12 @@ mod tests {
             .unwrap();
         assert_eq!(res.status(), StatusCode::NO_CONTENT);
 
-        // It now appears under the folder, and not at the root.
         let in_folder = list_files(&app, &format!("/api/files?folder_id={folder_id}")).await;
         assert_eq!(in_folder.len(), 1);
         assert_eq!(in_folder[0]["folder_id"], folder_id);
         let at_root = list_files(&app, "/api/files?folder_id=root").await;
         assert_eq!(at_root.len(), 0);
 
-        // Set tags, then confirm they come back on the file and in the global list.
         let res = app
             .clone()
             .oneshot(json_request(
@@ -445,7 +420,6 @@ mod tests {
         tags.sort();
         assert_eq!(tags, vec!["2026".to_string(), "beach".to_string()]);
 
-        // Bulk delete.
         let res = app
             .clone()
             .oneshot(json_request(
@@ -509,18 +483,15 @@ mod tests {
         upload_named(&app, "vacation.png", "image/png", &png).await;
         let note_id = upload_named(&app, "notes.txt", "text/plain", b"todo").await;
 
-        // Name search (case-insensitive substring).
         let hits = list_files(&app, "/api/files?q=vacat").await;
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0]["original_name"], "vacation.png");
 
-        // Type filter spans all folders.
         assert_eq!(list_files(&app, "/api/files?type=image").await.len(), 1);
         let text_hits = list_files(&app, "/api/files?type=text").await;
         assert_eq!(text_hits.len(), 1);
         assert_eq!(text_hits[0]["original_name"], "notes.txt");
 
-        // Tag filter.
         let res = app
             .clone()
             .oneshot(json_request(
@@ -569,8 +540,6 @@ mod tests {
             .status()
     }
 
-    /// The schema's two FK actions on folder delete: subfolders cascade away, but
-    /// contained files survive and fall back to the root.
     #[tokio::test]
     async fn folder_delete_cascades_subfolders_and_reparents_files_to_root() {
         let (state, base) = test_state().await;
@@ -580,7 +549,6 @@ mod tests {
         let child = create_folder(&app, "Child", Some(&parent)).await;
         let grandchild = create_folder(&app, "Grandchild", Some(&child)).await;
 
-        // A file in the doomed subtree.
         let file_id = upload_named(&app, "keep.txt", "text/plain", b"keep me").await;
         let res = app
             .clone()
@@ -593,13 +561,11 @@ mod tests {
             .unwrap();
         assert_eq!(res.status(), StatusCode::NO_CONTENT);
 
-        // Delete the top of the subtree.
         assert_eq!(
             status_of(&app, "DELETE", &format!("/api/folders/{parent}")).await,
             StatusCode::NO_CONTENT
         );
 
-        // Every descendant folder is gone.
         let res = app
             .clone()
             .oneshot(
@@ -614,7 +580,6 @@ mod tests {
         let folders: Vec<Value> = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(folders.len(), 0, "subfolders should cascade-delete");
 
-        // The file survives, reparented to the root rather than deleted.
         let at_root = list_files(&app, "/api/files?folder_id=root").await;
         assert_eq!(at_root.len(), 1, "contained files must not be deleted");
         assert_eq!(at_root[0]["id"], file_id);
@@ -623,7 +588,6 @@ mod tests {
         let _ = tokio::fs::remove_dir_all(base).await;
     }
 
-    /// Any of q/type/tag drops the folder predicate, so search spans every folder.
     #[tokio::test]
     async fn search_spans_all_folders_ignoring_folder_scope() {
         let (state, base) = test_state().await;
@@ -641,7 +605,6 @@ mod tests {
             .await
             .unwrap();
 
-        // Unfiltered, the two files are in different scopes.
         assert_eq!(list_files(&app, "/api/files?folder_id=root").await.len(), 1);
         assert_eq!(
             list_files(&app, &format!("/api/files?folder_id={folder}"))
@@ -650,7 +613,6 @@ mod tests {
             1
         );
 
-        // Searching finds both, even with a folder_id pinned to one of them.
         assert_eq!(list_files(&app, "/api/files?q=report").await.len(), 2);
         assert_eq!(
             list_files(&app, "/api/files?q=report&folder_id=root")
@@ -661,7 +623,6 @@ mod tests {
         );
         assert_eq!(list_files(&app, "/api/files?type=text").await.len(), 2);
 
-        // Combining all three predicates still builds valid SQL (WHERE/AND joins).
         app.clone()
             .oneshot(json_request(
                 "PUT",
@@ -677,7 +638,6 @@ mod tests {
         let _ = tokio::fs::remove_dir_all(base).await;
     }
 
-    /// `%` and `_` in a search term must match literally, not as LIKE wildcards.
     #[tokio::test]
     async fn like_metacharacters_in_search_are_matched_literally() {
         let (state, base) = test_state().await;
@@ -687,12 +647,10 @@ mod tests {
         upload_named(&app, "100%-done.txt", "text/plain", b"b").await;
         upload_named(&app, "a_b.txt", "text/plain", b"c").await;
 
-        // Bare `%` used to match every file in the database.
         let pct = list_files(&app, "/api/files?q=%25").await;
         assert_eq!(pct.len(), 1, "`%` must not act as a wildcard");
         assert_eq!(pct[0]["original_name"], "100%-done.txt");
 
-        // `_` used to match any single character, so `n_tes` matched `notes.txt`.
         assert_eq!(list_files(&app, "/api/files?q=n_tes").await.len(), 0);
         let underscore = list_files(&app, "/api/files?q=a_b").await;
         assert_eq!(underscore.len(), 1);
@@ -701,8 +659,6 @@ mod tests {
         let _ = tokio::fs::remove_dir_all(base).await;
     }
 
-    /// A file uploaded as text/html must never be served in a way the browser will
-    /// execute on this origin.
     #[tokio::test]
     async fn raw_never_serves_client_declared_html_inline() {
         let (state, base) = test_state().await;
@@ -738,7 +694,6 @@ mod tests {
             "nosniff"
         );
 
-        // Images stay inline so the viewer keeps working, but still get nosniff.
         let res = app
             .clone()
             .oneshot(
@@ -758,13 +713,11 @@ mod tests {
         let _ = tokio::fs::remove_dir_all(base).await;
     }
 
-    /// Client errors must surface as 4xx, not as the blanket 500 from `AppError`.
     #[tokio::test]
     async fn client_errors_return_4xx_not_500() {
         let (state, base) = test_state().await;
         let app = build_router(state);
 
-        // Unknown ids → 404 on every per-file route.
         for uri in [
             "/api/files/nope",
             "/api/files/nope/raw",
@@ -785,14 +738,12 @@ mod tests {
             StatusCode::NOT_FOUND
         );
 
-        // A file with no thumbnail 404s rather than erroring.
         let txt = upload_named(&app, "plain.txt", "text/plain", b"no thumb").await;
         assert_eq!(
             status_of(&app, "GET", &format!("/api/files/{txt}/thumb")).await,
             StatusCode::NOT_FOUND
         );
 
-        // Empty folder name, missing parent, and comma-bearing tags are all 400.
         let cases = [
             (
                 "POST",
@@ -824,7 +775,6 @@ mod tests {
             assert_eq!(res.status(), StatusCode::BAD_REQUEST, "{method} {uri}");
         }
 
-        // Renaming a missing folder is a 404; renaming to blank is a 400.
         let res = app
             .clone()
             .oneshot(json_request(
@@ -836,7 +786,6 @@ mod tests {
             .unwrap();
         assert_eq!(res.status(), StatusCode::NOT_FOUND);
 
-        // A multipart body with no file part is a 400, not an empty 200.
         let res = app
             .clone()
             .oneshot(

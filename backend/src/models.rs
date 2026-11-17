@@ -1,7 +1,5 @@
 use serde::Serialize;
 
-/// File metadata returned to the frontend. Deliberately omits internal fields
-/// like `storage_path` and `owner_id`.
 #[derive(Debug, Serialize)]
 pub struct FileDto {
     pub id: String,
@@ -14,8 +12,6 @@ pub struct FileDto {
     pub tags: Vec<String>,
 }
 
-/// Raw row shape from the listing query. `tags` is a comma-joined string from
-/// SQLite's `group_concat`, which we split into a `Vec` for the DTO.
 #[derive(sqlx::FromRow)]
 pub struct FileRow {
     pub id: String,

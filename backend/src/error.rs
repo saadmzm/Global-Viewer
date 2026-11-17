@@ -5,7 +5,6 @@ use axum::{
 };
 use serde_json::json;
 
-/// Application error that converts into a JSON HTTP response.
 pub enum AppError {
     NotFound,
     PayloadTooLarge,
@@ -33,8 +32,6 @@ impl IntoResponse for AppError {
     }
 }
 
-// Lets `?` turn any error that converts into anyhow::Error (sqlx, io, multipart…)
-// into a 500. Specific client-error cases are constructed explicitly above.
 impl<E> From<E> for AppError
 where
     E: Into<anyhow::Error>,
